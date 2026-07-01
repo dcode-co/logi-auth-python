@@ -49,6 +49,11 @@ def verify_id_token(
     if header is None or payload is None:
         raise IdTokenError("malformed")
 
+    # Only RS256 is accepted — never verify a token whose header declares another
+    # (or no) algorithm, even if the RSA signature happens to match.
+    if header.get("alg") != "RS256":
+        raise IdTokenError("bad_signature")
+
     kid = header.get("kid")
     if not isinstance(kid, str) or not kid:
         raise IdTokenError("missing_kid")
