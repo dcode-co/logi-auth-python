@@ -44,7 +44,7 @@ class LogiAuthServer:
         redirect_uri: str,
         client_secret: str | None = None,
         issuer: str = "https://api.1pass.dev",
-        token_issuer: str = "logi",
+        token_issuer: str = "https://api.1pass.dev",
         scopes: list[str] | None = None,
         jwks_cache_ttl: int = 3600,
     ):
