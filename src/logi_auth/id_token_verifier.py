@@ -12,6 +12,7 @@ checks are implemented here, mirroring verify.ts.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import time
 from typing import Any
@@ -29,14 +30,22 @@ def verify_id_token(
     expected: dict,
     now: int | None = None,
     clock_skew_sec: int = 60,
+    access_token: str | None = None,
 ) -> dict:
     """Verify ``id_token`` and return ``{"sub", "claims"}``.
 
     Raises :class:`IdTokenError` on any failure — never returns an unverified
-    subject. Claim order: signature -> iss -> aud -> exp -> iat -> nonce -> sub.
+    subject. Claim order: signature -> iss -> aud -> exp -> iat -> nonce -> sub
+    -> at_hash.
 
     ``expected`` is ``{"issuer", "client_id", "nonce"}`` (``nonce`` optional).
     ``now`` is Unix seconds; defaults to now. Injectable for deterministic tests.
+
+    ``access_token`` binds the id_token to the access_token per OIDC §3.1.3.6:
+    when the payload carries ``at_hash`` **and** ``access_token`` is supplied, the
+    left-most 128 bits of ``SHA-256(access_token)`` (base64url, no padding) MUST
+    equal ``at_hash``. When either is absent the check is skipped (backward
+    compatible with callers that only verify the id_token).
     """
     now = int(time.time()) if now is None else now
 
@@ -58,7 +67,21 @@ def verify_id_token(
     if not isinstance(kid, str) or not kid:
         raise IdTokenError("missing_kid")
 
-    jwk = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+    # Select the signing key by kid, but only among RSA keys usable for RS256
+    # signatures. Filtering on kty/use/alg keeps verification robust if the JWKS
+    # later mixes in EC (or encryption) keys: we still pick the correct RSA key
+    # instead of tripping over an unrelated one that happens to share a kid.
+    jwk = next(
+        (
+            k
+            for k in jwks.get("keys", [])
+            if k.get("kid") == kid
+            and k.get("kty") == "RSA"
+            and k.get("use") in (None, "sig")
+            and k.get("alg") in (None, "RS256")
+        ),
+        None,
+    )
     if jwk is None:
         raise IdTokenError("unknown_kid")
 
@@ -99,7 +122,21 @@ def verify_id_token(
     if not isinstance(sub, str) or not sub:
         raise IdTokenError("missing_claim")
 
+    # OIDC 3.1.3.6 at_hash: present-only binding. Checked last, after every other
+    # claim has been validated and only when the caller supplies the matching
+    # access_token, so id_token-only callers keep their existing behaviour.
+    at_hash = payload.get("at_hash")
+    if isinstance(at_hash, str) and access_token is not None:
+        if _at_hash(access_token) != at_hash:
+            raise IdTokenError("at_hash_mismatch")
+
     return {"sub": sub, "claims": payload}
+
+
+def _at_hash(access_token: str) -> str:
+    # base64url(no padding) of the left-most 128 bits of SHA-256(access_token).
+    digest = hashlib.sha256(access_token.encode("utf-8")).digest()[:16]
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 def _verify_rs256(signing_input: bytes, signature: bytes, jwk: dict) -> bool:

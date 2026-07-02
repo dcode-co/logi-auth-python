@@ -22,6 +22,7 @@ class IdTokenError(LogiAuthError):
         "expired",
         "nonce_mismatch",
         "missing_claim",
+        "at_hash_mismatch",
     )
 
     def __init__(self, code: str):

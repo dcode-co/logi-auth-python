@@ -124,7 +124,9 @@ class LogiAuthServer:
                 "Token response had no id_token — was `openid` in the scopes?",
             )
 
-        verified = self._verify_with_rotation_retry(id_token, nonce)
+        # _parse_token_body guarantees access_token is a non-empty str, so the
+        # at_hash binding is always exercised when the id_token carries at_hash.
+        verified = self._verify_with_rotation_retry(id_token, nonce, tokens["access_token"])
         email = verified["claims"].get("email")
         expires_in = tokens.get("expires_in")
 
@@ -145,17 +147,17 @@ class LogiAuthServer:
 
     # -- internals -----------------------------------------------------------
 
-    def _verify_with_rotation_retry(self, id_token: str, nonce: str) -> dict:
+    def _verify_with_rotation_retry(self, id_token: str, nonce: str, access_token: str) -> dict:
         expected = {"issuer": self.token_issuer, "client_id": self.client_id, "nonce": nonce}
         jwks, from_cache = self._fetch_jwks(force=False)
         try:
-            return verify_id_token(id_token, jwks, expected)
+            return verify_id_token(id_token, jwks, expected, access_token=access_token)
         except IdTokenError as err:
             # Key rotation within the cache TTL — bust + refetch once.
             if err.code == "unknown_kid" and from_cache:
                 fresh, _ = self._fetch_jwks(force=True)
                 try:
-                    return verify_id_token(id_token, fresh, expected)
+                    return verify_id_token(id_token, fresh, expected, access_token=access_token)
                 except IdTokenError as retry_err:
                     raise self._as_id_token_invalid(retry_err) from retry_err
             raise self._as_id_token_invalid(err) from err
