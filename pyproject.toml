@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "logi-auth"
-version = "1.0.1"
+dynamic = ["version"]
 description = "Server-side \"Sign in with logi\" for Python/Django — confidential OAuth 2.0 + id_token (RS256) verification."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -19,3 +19,6 @@ Issues = "https://github.com/dcode-co/logi-auth-python/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "logi_auth.__version__" }
