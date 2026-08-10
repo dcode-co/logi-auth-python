@@ -39,10 +39,34 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(q["code_challenge_method"], "S256")
         self.assertEqual(q["scope"], "openid profile:basic email")
 
-    def test_authorization_url_omits_pkce_when_absent(self):
-        url = build().authorization_url(state="st", nonce="no")
-        q = parse_qs(urlparse(url).query)
-        self.assertNotIn("code_challenge", q)
+    def test_authorization_url_requires_code_challenge(self):
+        # logi mandates PKCE for confidential clients too, so a URL without a
+        # challenge is one the server would always reject. Refuse to build it.
+        with self.assertRaises(ValueError):
+            build().authorization_url(state="st", nonce="no", code_challenge="")
+
+    def test_exchange_requires_code_verifier_before_network(self):
+        with self.assertRaises(ServerError) as ctx:
+            build().exchange_code_and_verify(code="c", nonce="n", code_verifier="")
+        self.assertEqual(ctx.exception.code, "invalid_code_verifier")
+
+    def test_exchange_always_sends_code_verifier(self):
+        server = build()
+        server._fetch_jwks = lambda force: ({"keys": []}, False)
+        captured = {}
+
+        def fake_post(url, form):
+            captured.update(form)
+            return (200, _TOKEN_BODY)
+
+        def fake_verify(id_token, jwks, expected, access_token=None):
+            return {"sub": "sub-1", "claims": {}}
+
+        server._post = fake_post
+        with mock.patch("logi_auth.server.verify_id_token", fake_verify):
+            server.exchange_code_and_verify(code="c", nonce="n", code_verifier="v")
+
+        self.assertEqual(captured["code_verifier"], "v")
 
     def test_requires_client_id_and_redirect_uri(self):
         with self.assertRaises(ValueError):
@@ -52,7 +76,7 @@ class ServerTest(unittest.TestCase):
 
     def test_exchange_rejects_empty_nonce_before_network(self):
         with self.assertRaises(ServerError) as ctx:
-            build().exchange_code_and_verify(code="c", nonce="")
+            build().exchange_code_and_verify(code="c", nonce="", code_verifier="v")
         self.assertEqual(ctx.exception.code, "invalid_nonce")
 
     def test_exchange_threads_access_token_into_verification(self):
@@ -66,7 +90,7 @@ class ServerTest(unittest.TestCase):
             return {"sub": "sub-1", "claims": {"email": "a@b.co"}}
 
         with mock.patch("logi_auth.server.verify_id_token", fake_verify):
-            session = server.exchange_code_and_verify(code="c", nonce="n")
+            session = server.exchange_code_and_verify(code="c", nonce="n", code_verifier="v")
 
         # The parsed access_token must be forwarded so at_hash is actually checked.
         self.assertEqual(captured["access_token"], "the-access-token")
@@ -82,7 +106,7 @@ class ServerTest(unittest.TestCase):
 
         with mock.patch("logi_auth.server.verify_id_token", fake_verify):
             with self.assertRaises(ServerError) as ctx:
-                server.exchange_code_and_verify(code="c", nonce="n")
+                server.exchange_code_and_verify(code="c", nonce="n", code_verifier="v")
 
         # at_hash mismatch surfaces as id_token_invalid before a session is built.
         self.assertEqual(ctx.exception.code, "id_token_invalid")
