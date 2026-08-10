@@ -28,6 +28,16 @@ server with this package — do **not** rely on a client-side check.
 pip install logi-auth
 ```
 
+## Upgrading from 1.x
+
+**2.0 is a breaking change.** logi mandates PKCE for every client type,
+confidential included — `.authorization_url()`'s `code_challenge` and
+`.exchange_code_and_verify()`'s `code_verifier` are now required keyword
+arguments (they were optional in 1.x). A call that omitted them was already
+being rejected by the server, so working code is unaffected; only calls that
+relied on the (always-failing) optional path need the two arguments added.
+See the Django example below for the full PKCE flow.
+
 ## Django view example
 
 ```python

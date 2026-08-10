@@ -9,7 +9,7 @@ from .errors import IdTokenError, LogiAuthError, ServerError
 from .id_token_verifier import verify_id_token
 from .server import LogiAuthServer, LogiSession
 
-__version__ = "1.0.1"
+__version__ = "2.0.0"
 
 __all__ = [
     "LogiAuthServer",
