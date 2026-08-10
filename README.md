@@ -44,6 +44,8 @@ LOGI = LogiAuthServer(
 
 ```python
 # views.py
+import base64
+import hashlib
 import secrets
 
 from django.http import HttpResponseBadRequest
@@ -58,9 +60,18 @@ from .models import User
 def logi_start(request):
     state = secrets.token_hex(16)
     nonce = secrets.token_hex(16)
+    # PKCE is mandatory on logi for confidential clients too — keep the
+    # verifier server-side and send only its S256 hash in the redirect.
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
     request.session["logi_state"] = state
     request.session["logi_nonce"] = nonce
-    return redirect(LOGI.authorization_url(state=state, nonce=nonce))
+    request.session["logi_verifier"] = verifier
+    return redirect(
+        LOGI.authorization_url(state=state, nonce=nonce, code_challenge=challenge)
+    )
 
 
 def logi_callback(request):
@@ -79,6 +90,7 @@ def logi_callback(request):
         result = LOGI.exchange_code_and_verify(
             code=code,
             nonce=request.session.pop("logi_nonce", None),
+            code_verifier=request.session.pop("logi_verifier", None),
         )
     except ServerError as e:
         # result.sub is only ever set after signature+iss+aud+exp+nonce all pass.
@@ -94,15 +106,19 @@ Identity claims (email/name) are **not** guaranteed on the id_token — fetch
 them from `GET {issuer}/oauth/userinfo` with the returned `access_token` as a
 Bearer token if you need more than `sub`/`email`.
 
-## Public client (PKCE, no secret)
+## Public client (no secret)
 
-Omit `client_secret` and pass a `code_challenge` / `code_verifier`:
+PKCE is **not** what separates the two client types — logi requires
+`code_challenge` / `code_verifier` from every client, confidential ones
+included, and the example above already carries them. The only difference for a
+public client is that there is no secret to send:
 
 ```python
 logi = LogiAuthServer(client_id=client_id, redirect_uri=redirect_uri)  # no secret
-url = logi.authorization_url(state=state, nonce=nonce, code_challenge=code_challenge)
-result = logi.exchange_code_and_verify(code=code, nonce=nonce, code_verifier=code_verifier)
 ```
+
+Everything else — the challenge on the way out, the verifier on the way back —
+is identical to the confidential flow.
 
 ## API
 
@@ -125,9 +141,11 @@ LogiAuthServer(
 )
 ```
 
-- **`.authorization_url(*, state, nonce, scopes=None, code_challenge=None, prompt=None) -> str`**
-  Builds the `/oauth/authorize` redirect URL.
-- **`.exchange_code_and_verify(*, code, nonce, code_verifier=None) -> LogiSession`**
+- **`.authorization_url(*, state, nonce, code_challenge, scopes=None, prompt=None) -> str`**
+  Builds the `/oauth/authorize` redirect URL. `code_challenge` is required —
+  it is the base64url-encoded SHA-256 of your verifier, and the server rejects
+  a request without it regardless of client type.
+- **`.exchange_code_and_verify(*, code, nonce, code_verifier) -> LogiSession`**
   Exchanges the authorization `code` for tokens, then verifies the returned
   `id_token` (signature via JWKS + `iss` + `aud` + `exp` + `nonce`, with a
   transparent single JWKS refetch on key rotation) before returning a
@@ -158,6 +176,7 @@ codes as the Ruby/Node/Web SDKs and the shared golden vectors).
 | Code | Meaning |
 |------|---------|
 | `invalid_nonce` | Missing nonce — the sign-in session likely expired |
+| `invalid_code_verifier` | Missing PKCE verifier — it was lost with the session, or never stored at `/start` |
 | `token_exchange_failed` | `/oauth/token` returned a non-2xx status or malformed body |
 | `missing_id_token` | Token response had no `id_token` (was `openid` in scopes?) |
 | `id_token_invalid` | id_token failed verification — `.detail` carries the underlying `IdTokenError.code` |
@@ -174,7 +193,9 @@ codes as the Ruby/Node/Web SDKs and the shared golden vectors).
 from logi_auth import ServerError
 
 try:
-    result = LOGI.exchange_code_and_verify(code=code, nonce=nonce)
+    result = LOGI.exchange_code_and_verify(
+        code=code, nonce=nonce, code_verifier=code_verifier
+    )
 except ServerError as e:
     logger.warning("logi sign-in failed: %s (%s)", e.code, e.detail)
     return redirect(f"/login?error={e.code}")

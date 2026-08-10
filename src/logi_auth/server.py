@@ -67,10 +67,22 @@ class LogiAuthServer:
         *,
         state: str,
         nonce: str,
+        code_challenge: str,
         scopes: list[str] | None = None,
-        code_challenge: str | None = None,
         prompt: str | None = None,
     ) -> str:
+        # PKCE is mandatory on logi for every client type, confidential ones
+        # included — /oauth/authorize rejects a missing code_challenge with
+        # invalid_request, and /oauth/token checks the verifier unconditionally.
+        # This used to be an optional argument, which let callers build a URL
+        # the server would always refuse; the failure surfaced only as an opaque
+        # redirect error. Refuse to build such a URL instead.
+        if not code_challenge:
+            raise ValueError(
+                "code_challenge is required — logi mandates PKCE for confidential "
+                "clients too. Generate a verifier, send S256(verifier) here, and "
+                "pass the same verifier to exchange_code_and_verify()."
+            )
         params = {
             "response_type": "code",
             "client_id": self.client_id,
@@ -78,16 +90,15 @@ class LogiAuthServer:
             "scope": " ".join(scopes or self.default_scopes),
             "state": state,
             "nonce": nonce,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
-        if code_challenge:
-            params["code_challenge"] = code_challenge
-            params["code_challenge_method"] = "S256"
         if prompt:
             params["prompt"] = prompt
         return f"{self.issuer}/oauth/authorize?{urllib.parse.urlencode(params)}"
 
     def exchange_code_and_verify(
-        self, *, code: str, nonce: str, code_verifier: str | None = None
+        self, *, code: str, nonce: str, code_verifier: str
     ) -> LogiSession:
         # The server flow always issued a nonce in authorization_url, so a
         # missing nonce here (e.g. an expired session) is a bug — never proceed
@@ -95,6 +106,16 @@ class LogiAuthServer:
         if not nonce:
             raise ServerError(
                 "invalid_nonce", "nonce is required — the sign-in session may have expired"
+            )
+        # Same reasoning as the code_challenge guard in authorization_url: the
+        # token endpoint checks the verifier for every client type, so an
+        # exchange without one can only end in invalid_grant. Fail here, where
+        # the cause is still legible, rather than after the round trip.
+        if not code_verifier:
+            raise ServerError(
+                "invalid_code_verifier",
+                "code_verifier is required — pass the verifier whose S256 hash "
+                "was sent as code_challenge; it may have been lost with the session",
             )
 
         form = {
@@ -105,8 +126,7 @@ class LogiAuthServer:
         }
         if self.client_secret:
             form["client_secret"] = self.client_secret
-        if code_verifier:
-            form["code_verifier"] = code_verifier
+        form["code_verifier"] = code_verifier
 
         status, body = self._post(f"{self.issuer}/oauth/token", form)
         if not 200 <= status < 300:
